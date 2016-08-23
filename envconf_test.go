@@ -1,6 +1,7 @@
 package envconf
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -94,16 +95,99 @@ func TestLoadString(t *testing.T) {
 	}
 }
 
+func TestLoadBytes(t *testing.T) {
+	var dest struct {
+		Val []byte
+	}
+	settings := map[string]string{
+		"VAL": "foo bar",
+	}
+	if err := Load(&dest, settings); err != nil {
+		t.Fatalf("cannot load: %s", err)
+	}
+	if string(dest.Val) != "foo bar" {
+		t.Errorf("invalid result: %#v", dest)
+	}
+}
+
 func TestLoadSliceOfString(t *testing.T) {
+	var dest struct {
+		S1 []string
+		S2 []string
+	}
+	settings := map[string]string{
+		"S1": "foo,bar",
+		"S2": "xx yy",
+	}
+	if err := Load(&dest, settings); err != nil {
+		t.Fatalf("cannot load: %s", err)
+	}
+	if want, got := []string{"foo", "bar"}, dest.S1; !reflect.DeepEqual(want, got) {
+		t.Errorf("S1: want %v, got %v", want, got)
+	}
+	if want, got := []string{"xx yy"}, dest.S2; !reflect.DeepEqual(want, got) {
+		t.Errorf("S2: want %v, got %v", want, got)
+	}
 }
 
 func TestLoadSliceOfInt(t *testing.T) {
+	var dest struct {
+		I1 []int
+		I2 []int
+	}
+	settings := map[string]string{
+		"I1": "11,22",
+		"I2": "104",
+	}
+	if err := Load(&dest, settings); err != nil {
+		t.Fatalf("cannot load: %s", err)
+	}
+	if want, got := []int{11, 22}, dest.I1; !reflect.DeepEqual(want, got) {
+		t.Errorf("I1: want %v, got %v", want, got)
+	}
+	if want, got := []int{104}, dest.I2; !reflect.DeepEqual(want, got) {
+		t.Errorf("I2: want %v, got %v", want, got)
+	}
 }
 
 func TestLoadSliceOfBool(t *testing.T) {
+	var dest struct {
+		B1 []bool
+		B2 []bool
+	}
+	settings := map[string]string{
+		"B1": "0,t,true,false",
+		"B2": "f",
+	}
+	if err := Load(&dest, settings); err != nil {
+		t.Fatalf("cannot load: %s", err)
+	}
+	if want, got := []bool{false, true, true, false}, dest.B1; !reflect.DeepEqual(want, got) {
+		t.Errorf("B1: want %v, got %v", want, got)
+	}
+	if want, got := []bool{false}, dest.B2; !reflect.DeepEqual(want, got) {
+		t.Errorf("B2: want %v, got %v", want, got)
+	}
 }
 
 func TestLoadSliceOfFloat(t *testing.T) {
+	var dest struct {
+		F1 []float32
+		F2 []float32
+	}
+	settings := map[string]string{
+		"F1": "11.32, 44, 12",
+		"F2": "22.321",
+	}
+	if err := Load(&dest, settings); err != nil {
+		t.Fatalf("cannot load: %s", err)
+	}
+	if want, got := []float32{11.32, 44, 12}, dest.F1; !reflect.DeepEqual(want, got) {
+		t.Errorf("F1: want %v, got %v", want, got)
+	}
+	if want, got := []float32{22.321}, dest.F2; !reflect.DeepEqual(want, got) {
+		t.Errorf("F2: want %v, got %v", want, got)
+	}
 }
 
 func TestLoadWithTagName(t *testing.T) {
@@ -186,9 +270,13 @@ type CustomField struct {
 	val string
 }
 
-func (cf *CustomField) ParseConf(s string) error {
-	cf.val = "custom: " + s
+func (cf *CustomField) UnmarshalText(b []byte) error {
+	cf.val = "custom: " + string(b)
 	return nil
+}
+
+func (cf *CustomField) MarshalText() ([]byte, error) {
+	return []byte(cf.val), nil
 }
 
 func TestDescribe(t *testing.T) {
@@ -238,6 +326,16 @@ custom   CustomField  (required)
 age      float64
 STR_ARR  string list
 INT_ARR  int16 list
+                        `,
+		},
+		"bytes": {
+			dest: &struct {
+				Raw   []byte
+				Bytes []byte `envconf:",required"`
+			}{},
+			want: `
+RAW    bytes
+BYTES  bytes  (required)
                         `,
 		},
 	}

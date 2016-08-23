@@ -2,9 +2,9 @@ package envconf
 
 import (
 	"bytes"
+	"encoding"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"reflect"
 	"regexp"
@@ -13,7 +13,60 @@ import (
 	"sync"
 )
 
+// Parse load environment variables into given structure.
+//
+// If program's first argument is `-h`, `--help` or `help`, instead of loading
+// configuration, detailed description will be printed to stdout and the
+// program is terminated with zero code.
+//
+// Unless function successfully parsed configuration, error is printed to
+// stderr and program is terminated with non zero code.
+func Parse(dest interface{}) {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "-h", "--help", "help":
+			info, err := Describe(dest)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Cannot print description: %s\n", err)
+				exit(1)
+			}
+			fmt.Fprint(os.Stdout, info)
+			exit(0)
+		}
+	}
+
+	env := make(map[string]string)
+	for _, kv := range os.Environ() {
+		pair := strings.SplitN(kv, "=", 2)
+		if len(pair) != 2 {
+			continue
+		}
+		env[pair[0]] = pair[1]
+	}
+
+	err := Load(dest, env)
+
+	if err == nil {
+		return
+	}
+
+	if errs, ok := err.(ParseErrors); ok {
+		fmt.Fprintln(os.Stderr, "Cannot parse configuration")
+		for _, err := range errs {
+			fmt.Fprintf(os.Stderr, "  %s: %s\n", err.Name, err.Err)
+		}
+		exit(2)
+	}
+
+	fmt.Fprintf(os.Stderr, "Cannot parse configuration: %s\n", err)
+	exit(1)
+}
+
+var exit = os.Exit
+
 // Load assign values from settings mapping into given structure.
+//
+// If error is caused by invalid configuration, ParseErrors is returned.
 func Load(dest interface{}, settings map[string]string) error {
 	s := reflect.ValueOf(dest)
 	if s.Kind() != reflect.Ptr {
@@ -64,8 +117,8 @@ func Load(dest interface{}, settings map[string]string) error {
 		}
 
 		if f.CanAddr() {
-			if cf, ok := f.Addr().Interface().(ConfField); ok {
-				if err := cf.ParseConf(value); err != nil {
+			if cf, ok := f.Addr().Interface().(encoding.TextUnmarshaler); ok {
+				if err := cf.UnmarshalText([]byte(value)); err != nil {
 					errs = append(errs, &ParseError{
 						Field: tp.Field(i).Name,
 						Name:  name,
@@ -143,6 +196,8 @@ func Load(dest interface{}, settings map[string]string) error {
 				for _, v := range vals {
 					f.Set(reflect.Append(f, reflect.ValueOf(v)))
 				}
+			case reflect.Uint8: // this is []byte
+				f.SetBytes([]byte(value))
 			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 				for _, v := range vals {
 					intValue, err := strconv.ParseInt(v, 0, f.Type().Elem().Bits())
@@ -193,10 +248,10 @@ func Load(dest interface{}, settings map[string]string) error {
 					f.Set(reflect.Append(f, fv))
 				}
 			default:
-				log.Printf("unsupported type: %s", f.Kind())
+				return fmt.Errorf("field %q: unsuported type %s", tp.Field(i).Name, f.Kind())
 			}
 		default:
-			log.Printf("unsupported type: %s", f.Kind())
+			return fmt.Errorf("field %q: unsuported type %s", tp.Field(i).Name, f.Kind())
 		}
 
 	}
@@ -218,31 +273,16 @@ func contains(arr []string, s string) bool {
 	return false
 }
 
-// Must write to stderr extended error information and exits if given error is
-// not nil.
-func Must(err error) {
-	if err == nil {
-		return
-	}
-	if errs, ok := err.(ParseErrors); !ok {
-		fmt.Fprintf(os.Stderr, "cannot parse config: %s\n", err)
-	} else {
-		fmt.Fprintln(os.Stderr, "cannot parse config")
-		for _, err := range errs {
-			fmt.Fprintf(os.Stderr, "  %s: %s\n", err.Name, err.Err)
-		}
-	}
-	os.Exit(2)
-}
-
 var splitList = struct {
 	sync.Mutex
 	fn func(string) []string
 }{
 	fn: func(s string) []string {
-		return strings.Split(s, ",")
+		return separatorRx.Split(s, -1)
 	},
 }
+
+var separatorRx = regexp.MustCompile(`\s*,\s*`)
 
 // SeparatorFunc set list separator function. By default, values are expected
 // to be separated by ,
@@ -282,19 +322,6 @@ func (e *ParseError) Error() string {
 	return fmt.Sprintf("cannot parse %s: %s", e.Field, e.Err)
 }
 
-// LoadEnv load configuration using environment variables.
-func LoadEnv(dest interface{}) error {
-	env := make(map[string]string)
-	for _, kv := range os.Environ() {
-		pair := strings.SplitN(kv, "=", 2)
-		if len(pair) != 2 {
-			continue
-		}
-		env[pair[0]] = pair[1]
-	}
-	return Load(dest, env)
-}
-
 func convertName(s string) string {
 	s = conv1.ReplaceAllStringFunc(s, func(val string) string {
 		return val[:1] + "_" + val[1:]
@@ -309,12 +336,6 @@ var (
 	conv1 = regexp.MustCompile(`.([A-Z][a-z]+)`)
 	conv2 = regexp.MustCompile(`([a-z0-9])([A-Z])`)
 )
-
-// ConfField represents any type that can be use to customize loading
-// configuration.
-type ConfField interface {
-	ParseConf(string) error
-}
 
 // Describe returns string description of given structure or error.
 //
@@ -368,7 +389,11 @@ func Describe(dest interface{}) (string, error) {
 		case reflect.Struct:
 			kind = f.Type().Name()
 		case reflect.Slice:
-			kind = f.Type().Elem().Name() + " list"
+			if f.Type().Elem().Kind() == reflect.Uint8 {
+				kind = "bytes"
+			} else {
+				kind = f.Type().Elem().Name() + " list"
+			}
 		}
 		if len(kind) > width2 {
 			width2 = len(kind)

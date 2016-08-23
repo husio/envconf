@@ -1,0 +1,11 @@
+language: go
+
+go:
+        - 1.6
+        - 1.7
+
+script:
+        - go test -v -race -timeout=90s github.com/husio/envconf/...
+        - go vet github.com/husio/envconf/...
+
+sudo: false
